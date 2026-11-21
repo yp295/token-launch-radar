@@ -1,9 +1,10 @@
-// patient-2: rank pre-token protocols by what a launch would be worth,
-// with the odds it ever lists, a range on every value, and a farm
-// verdict netted to the dollar.
+// patient-3: rank pre-token protocols by what a launch would be worth,
+// with the odds it ever lists, a range on every value, a farm verdict
+// netted to the dollar at a stake sized to the protocol, and a rank
+// range for every row from 200 bootstrap refits of the size curve.
 //
 // The board ranks every protocol in the sealed snapshot that could
-// actually launch a token. Five ideas carry the model:
+// actually launch a token. Six ideas carry the model:
 //
 //   1. The launch value is fitted, not guessed: on every run the program
 //      regresses log10(market cap / TVL) on log10(TVL) across the
@@ -19,11 +20,18 @@
 //   3. Every value carries a range from the model's own held-out
 //      misses: the leave-one-out residuals of the size curve set the
 //      width, and the dashboard reports how often the band held.
-//   4. Every row gets a farm verdict at a uniform $1,000 stake: the
-//      expected drop (5% of the implied value per dollar of TVL) minus
-//      gas, against a T-bill on the same money — plus the stake that
-//      would turn the row into a farm.
-//   5. Nothing is hidden: the dashboard prints the held-out tests,
+//   4. Every row gets a farm verdict at a stake sized to the protocol
+//      (0.1% of its TVL, $500–$25,000): the expected drop (5% of the
+//      implied value per dollar of TVL) minus gas, against a T-bill on
+//      the same money — plus the stake that would turn the row into a
+//      farm. At a uniform $1,000 the giants could never pay, so the
+//      whole top of the board read SKIP; the stake has to fit the
+//      protocol.
+//   5. Every rank carries its stability: the size curve is refit on
+//      200 bootstrap resamples of the live tokens (fixed seed, so the
+//      resamples are identical on every run), and each row reports the
+//      rank range it held across the refits.
+//   6. Nothing is hidden: the dashboard prints the held-out tests,
 //      including the one the curve loses, and the full census of the
 //      758 protocols.
 //
@@ -90,8 +98,12 @@ export interface ModelParams {
   odds_high: number;
   /** Share of a launch's value assumed to reach farmers. */
   drop_share: number;
-  /** The stake the verdict is judged at, in dollars. */
-  verdict_stake_usd: number;
+  /** Share of a protocol's TVL the verdict stake is sized at (0.001 = 0.1%). */
+  stake_share: number;
+  /** The verdict stake is never below this, in dollars. */
+  stake_floor_usd: number;
+  /** The verdict stake is never above this, in dollars. */
+  stake_cap_usd: number;
   /** Annual rate of the T-bill the verdict is judged against. */
   tbill_apr: number;
   /** Gas per transaction on Ethereum, in dollars. */
@@ -102,7 +114,7 @@ export interface ModelParams {
   gas_tx_count: number;
 }
 
-export const MODEL_VERSION = 'patient-2';
+export const MODEL_VERSION = 'patient-3';
 
 /** Live-token rows the dashboard's separate view carries, by market cap. */
 export const LIVE_VIEW_ROWS = 30;
@@ -127,7 +139,9 @@ export function defaultParams(): ModelParams {
     odds_low: 0.05,
     odds_high: 0.98,
     drop_share: 0.05,
-    verdict_stake_usd: 1000,
+    stake_share: 0.001,
+    stake_floor_usd: 500,
+    stake_cap_usd: 25000,
     tbill_apr: 0.045,
     gas_eth_usd: 3,
     gas_cheap_usd: 0.5,
@@ -440,11 +454,36 @@ export interface HeldOutTest {
   tested: number;
 }
 
+/** Rank stability from the bootstrap refits, for the whole board. */
+export interface RankStabilitySummary {
+  /** Bootstrap resamples of the live tokens. */
+  refits: number;
+  /** Median P90-minus-P10 rank width across the board's rows. */
+  medianWidth: number;
+  /** Top-20 rows whose P90 rank stays inside the top 20. */
+  top20Stable: number;
+}
+
+/** One row's rank range across the bootstrap refits. */
+export interface RankRange {
+  slug: string;
+  /** 10th percentile of the row's rank across refits. */
+  p10: number;
+  /** 90th percentile of the row's rank across refits. */
+  p90: number;
+  /** Share of refits in which the row stayed in the top 20. */
+  top20Share: number;
+}
+
 /** Everything the dashboard's evidence section prints. */
 export interface Validation {
   loo: HeldOutTest;
   splitLowHigh: HeldOutTest;
   splitHighLow: HeldOutTest;
+  /** Ten random 50/50 splits of the live tokens: the median miss of the ten. */
+  randomSplits: HeldOutTest;
+  /** Rank stability across the bootstrap refits. */
+  rankStability: RankStabilitySummary;
   /** Standard deviation of the leave-one-out log errors: the range's width. */
   sigmaLog10: number;
   /** Share of held-out live tokens whose true market cap falls in the P25-P75 band. */
@@ -463,6 +502,32 @@ function median(values: number[]): number {
   const sorted = [...values].sort((a, b) => a - b);
   const mid = Math.floor(sorted.length / 2);
   return sorted.length % 2 === 1 ? sorted[mid]! : (sorted[mid - 1]! + sorted[mid]!) / 2;
+}
+
+/**
+ * A small seeded generator (mulberry32): the random splits and the
+ * bootstrap resamples must be identical on every run, so the program
+ * never draws from Math.random or the clock. One fixed seed per use.
+ */
+function seededRandom(seed: number): () => number {
+  let state = seed >>> 0;
+  return () => {
+    state = (state + 0x6d2b79f5) >>> 0;
+    let t = state;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+/** A Fisher-Yates shuffle that draws only from the seeded generator. */
+function seededShuffle<T>(values: T[], random: () => number): T[] {
+  const out = [...values];
+  for (let i = out.length - 1; i > 0; i--) {
+    const j = Math.floor(random() * (i + 1));
+    [out[i], out[j]] = [out[j]!, out[i]!];
+  }
+  return out;
 }
 
 /** Solve a small linear system by Gaussian elimination. */
@@ -542,6 +607,28 @@ export function validateModel(snapshot: Snapshot): Validation {
   const splitLowHigh = splitTest(order.slice(0, half), order.slice(half));
   const splitHighLow = splitTest(order.slice(half), order.slice(0, half));
 
+  // Random splits: ten seeded 50/50 splits of the live tokens. The
+  // seed is fixed, so the splits are the same on every run. The table
+  // prints the median miss across the ten splits.
+  const splitRandom = seededRandom(0x20261114);
+  const randomMisses: number[] = [];
+  const randomFlats: number[] = [];
+  for (let s = 0; s < 10; s++) {
+    const shuffled = seededShuffle(
+      comps.map((_, i) => i),
+      splitRandom,
+    );
+    const one = splitTest(shuffled.slice(0, half), shuffled.slice(half));
+    randomMisses.push(Math.log10(one.miss));
+    randomFlats.push(Math.log10(one.flatMiss));
+  }
+  const randomSplits: HeldOutTest = {
+    name: 'Random splits ×10 (median)',
+    miss: Math.pow(10, median(randomMisses)),
+    flatMiss: Math.pow(10, median(randomFlats)),
+    tested: order.length - half,
+  };
+
   // Growth and age: do they add anything to the comps' ratios?
   const sizeOnly = ols(xs, ys);
   const rows = comps.map((p) => {
@@ -571,6 +658,10 @@ export function validateModel(snapshot: Snapshot): Validation {
     loo,
     splitLowHigh,
     splitHighLow,
+    randomSplits,
+    // Filled in by buildRadar once the board exists: the refits re-rank
+    // the board, so the summary needs the rows.
+    rankStability: { refits: 0, medianWidth: 0, top20Stable: 0 },
     sigmaLog10: sigma,
     p25Coverage,
     p90Coverage,
@@ -578,6 +669,72 @@ export function validateModel(snapshot: Snapshot): Validation {
     r2WithGrowthAge: total === 0 ? 0 : 1 - residual / total,
     growthCoef: beta[2]!,
   };
+}
+
+/**
+ * Bootstrap rank stability: refit the size curve on 200 resamples of
+ * the live tokens (sampling with replacement, fixed seed) and re-rank
+ * the whole board under each refit. Growth, maturity and odds are held
+ * fixed — they are bounded priors and peer counts, not fitted terms —
+ * so the refits measure the fitted curve's uncertainty only. Returns
+ * each row's rank range (P10–P90) and its share of refits in the top 20.
+ */
+export function rankStability(
+  snapshot: Snapshot,
+  params: ModelParams,
+  odds: OddsTable,
+  sigmaLog10: number,
+  rows: Array<{ slug: string; implied_value_usd: number }>,
+): Map<string, RankRange> {
+  const comps = liveComps(snapshot.protocols);
+  const xs = comps.map((p) => Math.log10(p.tvl_usd));
+  const ys = comps.map((p) => Math.log10(p.mcap_usd! / p.tvl_usd));
+  // Per-row factors that do not move in a refit: growth, maturity, odds.
+  const bySlug = new Map(snapshot.protocols.map((p) => [p.slug, p]));
+  const factors = rows.map((r) => {
+    const p = bySlug.get(r.slug)!;
+    const score = scoreProtocol(p, snapshot.as_of, params, odds, sigmaLog10);
+    return {
+      slug: r.slug,
+      tvl: p.tvl_usd,
+      growthMult: score.growthMult,
+      maturityMult: score.maturityMult,
+      odds: score.odds,
+    };
+  });
+  const refits = 200;
+  const ranks = new Map<string, number[]>();
+  for (const f of factors) ranks.set(f.slug, []);
+  const random = seededRandom(0x20261121);
+  for (let b = 0; b < refits; b++) {
+    const sampleX: number[] = [];
+    const sampleY: number[] = [];
+    for (let i = 0; i < comps.length; i++) {
+      const j = Math.floor(random() * comps.length);
+      sampleX.push(xs[j]!);
+      sampleY.push(ys[j]!);
+    }
+    const fit = ols(sampleX, sampleY);
+    const implied = factors.map((f) => {
+      const base = Math.min(
+        params.multiple_high,
+        Math.max(params.multiple_low, Math.pow(10, fit.intercept + fit.slope * Math.log10(f.tvl))),
+      );
+      const launch = Math.max(1, Math.round(f.tvl * base * f.growthMult * f.maturityMult));
+      return { slug: f.slug, implied: Math.max(1, Math.round(launch * f.odds)) };
+    });
+    implied.sort((a, b) => b.implied - a.implied || (a.slug < b.slug ? -1 : a.slug > b.slug ? 1 : 0));
+    implied.forEach((row, i) => ranks.get(row.slug)!.push(i + 1));
+  }
+  const out = new Map<string, RankRange>();
+  for (const [slug, list] of ranks) {
+    const sorted = [...list].sort((a, b) => a - b);
+    const p10 = sorted[Math.floor(0.1 * (sorted.length - 1))]!;
+    const p90 = sorted[Math.floor(0.9 * (sorted.length - 1))]!;
+    const top20Share = list.filter((r) => r <= 20).length / list.length;
+    out.set(slug, { slug, p10, p90, top20Share });
+  }
+  return out;
 }
 
 // ---------------------------------------------------------------- scoring
@@ -666,10 +823,12 @@ export function nearestNeighbours(p: SnapshotProtocol, snapshot: Snapshot): Neig
 
 // ---------------------------------------------------------------- farm economics
 
-/** A row's verdict at the uniform yardstick stake. */
+/** A row's verdict at a stake sized to the protocol. */
 export interface FarmVerdict {
   verdict: 'FARM' | 'THIN' | 'SKIP';
-  /** Expected drop at the yardstick stake, in dollars. */
+  /** The stake the verdict is judged at, in dollars. */
+  stakeUsd: number;
+  /** Expected drop at the verdict stake, in dollars. */
   dropUsd: number;
   /** Gas for the plan's four transactions, in dollars. */
   gasUsd: number;
@@ -705,7 +864,14 @@ function holdDaysFor(ageDays: number | null): number {
   return 30;
 }
 
-/** The verdict for one scored row, at the yardstick stake. */
+/** The stake a verdict is judged at: 0.1% of the protocol's TVL, floored and capped. */
+export function modelStakeUsd(p: SnapshotProtocol, params: ModelParams): number {
+  return Math.round(
+    Math.min(params.stake_cap_usd, Math.max(params.stake_floor_usd, params.stake_share * p.tvl_usd)),
+  );
+}
+
+/** The verdict for one scored row, at its deposit-sized stake. */
 export function farmVerdict(
   p: SnapshotProtocol,
   implied: number,
@@ -715,7 +881,7 @@ export function farmVerdict(
   const depositUsd = capitalFor(p);
   const holdDays = holdDaysFor(ageDays);
   const dropRate = params.drop_share * (implied / p.tvl_usd);
-  const stake = params.verdict_stake_usd;
+  const stake = modelStakeUsd(p, params);
   const dropUsd = stake * dropRate;
   const perTx = p.chains.includes('Ethereum') ? params.gas_eth_usd : params.gas_cheap_usd;
   const gasUsd = params.gas_tx_count * perTx;
@@ -733,6 +899,7 @@ export function farmVerdict(
   }
   return {
     verdict,
+    stakeUsd: stake,
     dropUsd,
     gasUsd,
     hours,
@@ -830,12 +997,14 @@ export function farmPlan(
   const gas = capital >= 200 ? 8 : 4;
   const verdictText =
     verdict.verdict === 'FARM'
-      ? `Verdict: FARM — at a $${params.verdict_stake_usd} stake this row models a ${money(verdict.dropUsd)} drop, ${money(verdict.gasUsd)} of gas and ${verdict.hours} hours, net ${money(verdict.netUsd)} (${money(verdict.netPerHour)} an hour) against a ${money(verdict.tbillUsd)} T-bill; a $${verdict.stakeToFarm} stake is already enough to farm it.`
+      ? `Verdict: FARM — at a $${verdict.stakeUsd} stake this row models a ${money(verdict.dropUsd)} drop, ${money(verdict.gasUsd)} of gas and ${verdict.hours} hours, net ${money(verdict.netUsd)} (${money(verdict.netPerHour)} an hour) against a ${money(verdict.tbillUsd)} T-bill; a $${verdict.stakeToFarm} stake is already enough to farm it.`
       : verdict.verdict === 'THIN'
-        ? `Verdict: THIN — at a $${params.verdict_stake_usd} stake this row models a ${money(verdict.dropUsd)} drop, ${money(verdict.gasUsd)} of gas and ${verdict.hours} hours, net ${money(verdict.netUsd)} (${money(verdict.netPerHour)} an hour) against a ${money(verdict.tbillUsd)} T-bill; a $${verdict.stakeToFarm} stake would turn it into a farm.`
+        ? verdict.stakeToFarm === null
+          ? `Verdict: THIN — at a $${verdict.stakeUsd} stake this row models a ${money(verdict.dropUsd)} drop, ${money(verdict.gasUsd)} of gas and ${verdict.hours} hours, net ${money(verdict.netUsd)} (${money(verdict.netPerHour)} an hour) against a ${money(verdict.tbillUsd)} T-bill; no stake clears the T-bill bar, so the money earns more sitting still.`
+          : `Verdict: THIN — at a $${verdict.stakeUsd} stake this row models a ${money(verdict.dropUsd)} drop, ${money(verdict.gasUsd)} of gas and ${verdict.hours} hours, net ${money(verdict.netUsd)} (${money(verdict.netPerHour)} an hour) against a ${money(verdict.tbillUsd)} T-bill; a $${verdict.stakeToFarm} stake would turn it into a farm.`
         : verdict.stakeToFarm === null
-          ? `Verdict: SKIP — at a $${params.verdict_stake_usd} stake this row models a ${money(verdict.dropUsd)} drop, ${money(verdict.gasUsd)} of gas and ${verdict.hours} hours, net ${money(verdict.netUsd)} (${money(verdict.netPerHour)} an hour) against a ${money(verdict.tbillUsd)} T-bill; no stake clears the T-bill bar, so the money earns more sitting still.`
-          : `Verdict: SKIP — at a $${params.verdict_stake_usd} stake this row models a ${money(verdict.dropUsd)} drop, ${money(verdict.gasUsd)} of gas and ${verdict.hours} hours, net ${money(verdict.netUsd)} (${money(verdict.netPerHour)} an hour) against a ${money(verdict.tbillUsd)} T-bill; it would take a $${verdict.stakeToFarm} stake to farm it.`;
+          ? `Verdict: SKIP — at a $${verdict.stakeUsd} stake this row models a ${money(verdict.dropUsd)} drop, ${money(verdict.gasUsd)} of gas and ${verdict.hours} hours, net ${money(verdict.netUsd)} (${money(verdict.netPerHour)} an hour) against a ${money(verdict.tbillUsd)} T-bill; no stake clears the T-bill bar, so the money earns more sitting still.`
+          : `Verdict: SKIP — at a $${verdict.stakeUsd} stake this row models a ${money(verdict.dropUsd)} drop, ${money(verdict.gasUsd)} of gas and ${verdict.hours} hours, net ${money(verdict.netUsd)} (${money(verdict.netPerHour)} an hour) against a ${money(verdict.tbillUsd)} T-bill; it would take a $${verdict.stakeToFarm} stake to farm it.`;
   const steps: FarmStep[] = [
     {
       text: `Open a fresh wallet for this farm only, fund it with $${capital}, and keep its seed phrase offline — never in a screenshot or a chat.`,
@@ -869,7 +1038,7 @@ export function farmPlan(
     },
     {
       text: verdictText,
-      cost: `net ${money(verdict.netUsd)} at the $${params.verdict_stake_usd} yardstick`,
+      cost: `net ${money(verdict.netUsd)} at the $${verdict.stakeUsd} yardstick`,
       time: `${verdict.hours} hours`,
     },
   ];
@@ -919,6 +1088,7 @@ export interface BoardRow {
     verdict: string;
     verdict_net_usd: number;
     verdict_net_per_hour_usd: number;
+    verdict_stake_usd: number;
     verdict_stake_to_farm_usd: number | null;
   };
   farm_steps: string[];
@@ -967,9 +1137,13 @@ export interface RadarRow {
   verdict_gas_usd: number;
   verdict_hours: number;
   verdict_tbill_usd: number;
+  verdict_stake_usd: number;
   verdict_stake_to_farm_usd: number | null;
   verdict_deposit_usd: number;
   verdict_hold_days: number;
+  rank_p10: number;
+  rank_p90: number;
+  rank_top20_share: number;
   neighbours: Neighbour[];
   farm_steps: string[];
 }
@@ -982,6 +1156,7 @@ export interface BuildChecks {
   distinct_implied: number;
   farm_steps_ok: boolean;
   no_external_urls: boolean;
+  rank_ranges_ok: boolean;
 }
 
 /** Everything the dashboard page needs, as one object. */
@@ -1084,6 +1259,7 @@ export function buildBoard(
       verdict: s.verdict.verdict,
       verdict_net_usd: round2(s.verdict.netUsd),
       verdict_net_per_hour_usd: round2(s.verdict.netPerHour),
+      verdict_stake_usd: s.verdict.stakeUsd,
       verdict_stake_to_farm_usd: s.verdict.stakeToFarm,
     },
     farm_steps: farmPlan(s.p, s.score.ageDays, s.verdict, params),
@@ -1108,11 +1284,16 @@ export function liveView(snapshot: Snapshot): LiveRow[] {
 }
 
 /** One board row in the compact form the dashboard page reads. */
-export function radarRow(row: BoardRow, snapshot: Snapshot): RadarRow {
+export function radarRow(
+  row: BoardRow,
+  snapshot: Snapshot,
+  ranges: Map<string, RankRange>,
+): RadarRow {
   const bySlug = new Map(snapshot.protocols.map((p) => [p.slug, p]));
   const p = bySlug.get(row.slug)!;
   const neighbours = nearestNeighbours(p, snapshot);
   const verdict = farmVerdict(p, row.implied_value_usd, row.model.age_days, defaultParams());
+  const range = ranges.get(row.slug) ?? { slug: row.slug, p10: row.rank, p90: row.rank, top20Share: 0 };
   return {
     rank: row.rank,
     slug: row.slug,
@@ -1144,9 +1325,13 @@ export function radarRow(row: BoardRow, snapshot: Snapshot): RadarRow {
     verdict_gas_usd: round2(verdict.gasUsd),
     verdict_hours: verdict.hours,
     verdict_tbill_usd: round2(verdict.tbillUsd),
+    verdict_stake_usd: row.model.verdict_stake_usd,
     verdict_stake_to_farm_usd: row.model.verdict_stake_to_farm_usd,
     verdict_deposit_usd: verdict.depositUsd,
     verdict_hold_days: verdict.holdDays,
+    rank_p10: range.p10,
+    rank_p90: range.p90,
+    rank_top20_share: Math.round(range.top20Share * 100) / 100,
     neighbours,
     farm_steps: row.farm_steps,
   };
@@ -1163,6 +1348,19 @@ export function buildRadar(
   const board = buildBoard(snapshot, params, odds, validation.sigmaLog10);
   const live = liveView(snapshot);
   const early = board.filter((r) => !snapshot.watchlist.includes(r.slug)).length;
+  // Rank stability: refit the size curve 200 times and re-rank the board.
+  const ranges = rankStability(snapshot, params, odds, validation.sigmaLog10, board);
+  const widths = board.map((r) => {
+    const g = ranges.get(r.slug)!;
+    return g.p90 - g.p10;
+  });
+  validation.rankStability = {
+    refits: 200,
+    medianWidth: median(widths),
+    top20Stable: board
+      .slice(0, 20)
+      .filter((r) => ranges.get(r.slug)!.p90 <= 20).length,
+  };
   const reasons = new Map<string, number>();
   let setAside = 0;
   let liveToken = 0;
@@ -1203,7 +1401,7 @@ export function buildRadar(
     },
     verdict_counts: verdictCounts,
     checks,
-    rows: board.map((row) => radarRow(row, snapshot)),
+    rows: board.map((row) => radarRow(row, snapshot, ranges)),
     live,
   };
   return { board, radar };

@@ -1,4 +1,4 @@
-// Token Radar (patient-2) — the entry program.
+// Token Radar (patient-3) — the entry program.
 //
 // Reads the sealed DefiLlama snapshot, scores every pre-token protocol
 // that could actually launch a token, and writes the ranked board, the
@@ -92,6 +92,7 @@ const { board, radar } = buildRadar(snapshot, params, odds, validation, {
   distinct_implied: 0,
   farm_steps_ok: true,
   no_external_urls: noExternalUrls,
+  rank_ranges_ok: false,
 });
 // Fill the cover checks from the board that was just built.
 radar.checks.rows = board.length;
@@ -104,6 +105,9 @@ radar.checks.farm_steps_ok = board.every(
     r.farm_steps.length >= 3 &&
     r.farm_steps.length <= 12 &&
     r.farm_steps.every((s) => s.length >= 20 && s.length <= 600),
+);
+radar.checks.rank_ranges_ok = radar.rows.every(
+  (r) => r.rank_p10 >= 1 && r.rank_p10 <= r.rank && r.rank <= r.rank_p90 && r.rank_p90 <= board.length,
 );
 
 const issue = boardIssue(board, snapshot);
@@ -158,5 +162,6 @@ process.stdout.write(
   `token radar: ${snapshot.protocols.length} protocols, ${snapshot.watchlist.length} on the watchlist, ${board.length} rows scored (${radar.early_size} early, ${radar.live_size} live set aside)\n` +
     `token radar: size curve fitted on ${params.fit_n} live protocols (intercept ${params.fit_intercept.toFixed(4)}, slope ${params.fit_slope.toFixed(4)}); leave-one-out miss x${validation.loo.miss.toFixed(2)} vs flat x${validation.loo.flatMiss.toFixed(2)}\n` +
     `token radar: odds from ${odds.peers} launch-eligible peers (Brier ${odds.brierBinned.toFixed(3)} vs base ${odds.brierBase.toFixed(3)}); verdicts FARM ${radar.verdict_counts.FARM} / THIN ${radar.verdict_counts.THIN} / SKIP ${radar.verdict_counts.SKIP}\n` +
+    `token radar: rank stability over ${validation.rankStability.refits} refits: median rank width ${validation.rankStability.medianWidth}, ${validation.rankStability.top20Stable} of the top 20 stay in the top 20\n` +
     `token radar: wrote ${join(out, 'board.json')}, ${join(out, 'data.js')}, ${join(out, 'dashboard')}, ${join(out, 'screenshots')} (${shots.length} images) and ${join(out, 'dossier.json')}\n`,
 );

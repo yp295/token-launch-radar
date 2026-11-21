@@ -10,12 +10,13 @@ are not a wrapped or staked product of one that trades, rank them by what
 their launch would be worth, and hand in a web dashboard with the board,
 a detail view per protocol, and the steps to farm each one.
 
-## The model (radar-2)
+## The model (patient-3)
 
 One function scores every protocol, from the snapshot figures only:
 
 ```
-implied = round( tvl_usd × multiple(tvl_usd)
+implied = round( launch × odds(age, tvl) )
+launch  = round( tvl_usd × multiple(tvl_usd)
                  × (1 + 0.30 × ln(1 + clamp(change_7d, -50, 200) / 100))
                  × (0.60 + 0.40 × age / (age + 365)) )
 ```
@@ -32,6 +33,15 @@ implied = round( tvl_usd × multiple(tvl_usd)
 - **Rankable means launchable** — pre-token, and not a wrapped, staked
   or bridged product of a token that already trades. The board ranks all
   198 protocols that pass: 40 watchlist + 158 early rows.
+- **Token odds, from the peers** — the share of launch-eligible
+  protocols in the same age-and-size cell that already record a token.
+- **A range on every value** — from the leave-one-out residuals of the
+  size curve (P25–P75 and P10–P90).
+- **A farm verdict at a deposit-sized stake** — 0.1% of the protocol's
+  TVL ($500–$25,000), netted against gas and a 4.5% T-bill; the
+  dashboard lets the reader pick another stake and recomputes live.
+- **Rank stability** — every rank is re-derived under 200 bootstrap
+  refits of the size curve, and each row reports its P10–P90 rank range.
 
 The full specification, with the calibration numbers and the top 20, is
 in [MODEL.md](../MODEL.md) — kept in the project notes, not the repo.

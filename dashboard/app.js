@@ -1,4 +1,4 @@
-// Token Radar — patient-2 dashboard. Reads window.RADAR (written beside
+// Token Radar — patient-3 dashboard. Reads window.RADAR (written beside
 // dashboard/ by main.ts) and renders the ranked board, the filters, an
 // expandable detail view per protocol, the live-token table and the model
 // the board was scored with. No network: every byte shown is in data.js.
@@ -7,13 +7,59 @@
 // value and range in the page, from the snapshot figures the row carries
 // and the fitted parameters — so the number on screen and the number in
 // board.json are visibly the same arithmetic, not two different claims.
+// The stake control recomputes every farm verdict live in the same way:
+// pick another stake and the verdicts, nets and $/hour figures follow.
 (function () {
   'use strict';
 
   var DATA = window.RADAR;
   if (!DATA) return;
   var app = document.getElementById('board');
-  var state = { q: '', category: 'all', chain: 'all', verdict: 'all', watchOnly: false, sort: 'implied', dir: -1, expanded: null };
+  var state = { q: '', category: 'all', chain: 'all', verdict: 'all', watchOnly: false, sort: 'implied', dir: -1, expanded: null, stake: 'model' };
+
+  var STAKES = [500, 1000, 5000, 10000, 25000, 50000];
+
+  // The stake a verdict is judged at: the model's deposit-sized stake,
+  // or the stake the reader picked. Same arithmetic as lib/model.ts.
+  function effectiveStake(row) {
+    if (state.stake === 'model') return row.verdict_stake_usd;
+    return parseInt(state.stake, 10);
+  }
+
+  // Recompute a row's farm verdict at a stake, in the page.
+  function liveVerdict(row, stake) {
+    var m = DATA.model;
+    var dropRate = m.drop_share * (row.implied_value_usd / row.tvl_usd);
+    var drop = stake * dropRate;
+    var perTx = (row.chains || []).indexOf('Ethereum') >= 0 ? m.gas_eth_usd : m.gas_cheap_usd;
+    var gas = m.gas_tx_count * perTx;
+    var hours = 0.75 + 0.25 * Math.ceil(row.verdict_hold_days / 7);
+    var net = drop - gas;
+    var tbill = stake * m.tbill_apr * (row.verdict_hold_days / 365);
+    var verdict = net >= tbill && net >= 5 ? 'FARM' : net >= 0 ? 'THIN' : 'SKIP';
+    var tbillRate = m.tbill_apr * (row.verdict_hold_days / 365);
+    var stakeToFarm = null;
+    if (dropRate > tbillRate) {
+      stakeToFarm = Math.ceil(Math.max((gas + 5) / dropRate, gas / (dropRate - tbillRate)) / 10) * 10;
+    }
+    return { verdict: verdict, stake: stake, drop: drop, gas: gas, hours: hours, net: net, perHour: net / hours, tbill: tbill, stakeToFarm: stakeToFarm };
+  }
+
+  // The verdict, net and $/hour the board shows for a row right now:
+  // the model's own figures at the model stake, the live recompute at
+  // any other stake the reader picked.
+  function effVerdict(row) {
+    if (state.stake === 'model') return row.verdict;
+    return liveVerdict(row, effectiveStake(row)).verdict;
+  }
+  function effNetPerHour(row) {
+    if (state.stake === 'model') return row.verdict_net_per_hour_usd;
+    return liveVerdict(row, effectiveStake(row)).perHour;
+  }
+  function effNet(row) {
+    if (state.stake === 'model') return row.verdict_net_usd;
+    return liveVerdict(row, effectiveStake(row)).net;
+  }
 
   var usdFull = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 0 });
   function fmtUsd(n) {
@@ -138,6 +184,7 @@
     if (params.get('category')) state.category = params.get('category');
     if (params.get('chain')) state.chain = params.get('chain');
     if (params.get('verdict')) state.verdict = params.get('verdict');
+    if (params.get('stake')) state.stake = params.get('stake');
     if (params.get('p')) state.expanded = params.get('p');
     if (params.get('watch') === '1') state.watchOnly = true;
   }
@@ -147,6 +194,7 @@
     if (state.category !== 'all') params.set('category', state.category);
     if (state.chain !== 'all') params.set('chain', state.chain);
     if (state.verdict !== 'all') params.set('verdict', state.verdict);
+    if (state.stake !== 'model') params.set('stake', state.stake);
     if (state.watchOnly) params.set('watch', '1');
     if (state.expanded) params.set('p', state.expanded);
     var next = params.toString();
@@ -160,7 +208,7 @@
       if (state.watchOnly && !WATCH[r.slug]) return false;
       if (state.category !== 'all' && (r.category || 'Other') !== state.category) return false;
       if (state.chain !== 'all' && (r.chains || []).indexOf(state.chain) < 0) return false;
-      if (state.verdict !== 'all' && r.verdict !== state.verdict) return false;
+      if (state.verdict !== 'all' && effVerdict(r) !== state.verdict) return false;
       if (!q) return true;
       var hay = [r.name, r.slug, r.category, (r.chains || []).join(' ')].join(' ').toLowerCase();
       return hay.indexOf(q) >= 0;
@@ -174,7 +222,7 @@
       else if (key === 'tvl') { av = a.tvl_usd; bv = b.tvl_usd; }
       else if (key === 'launch') { av = a.launch_value_usd; bv = b.launch_value_usd; }
       else if (key === 'odds') { av = a.token_odds; bv = b.token_odds; }
-      else if (key === 'net') { av = a.verdict_net_per_hour_usd; bv = b.verdict_net_per_hour_usd; }
+      else if (key === 'net') { av = effNetPerHour(a); bv = effNetPerHour(b); }
       else if (key === 'growth') { av = a.change_7d === null ? -Infinity : a.change_7d; bv = b.change_7d === null ? -Infinity : b.change_7d; }
       else if (key === 'age') { av = a.age_days === null ? Infinity : a.age_days; bv = b.age_days === null ? Infinity : b.age_days; }
       else { av = a.implied_value_usd; bv = b.implied_value_usd; }
@@ -186,7 +234,7 @@
 
   function header() {
     return el('header', { class: 'topbar' },
-      el('div', { class: 'wordmark' }, 'Token ', el('b', { text: 'Radar' }), ' · patient-2'),
+      el('div', { class: 'wordmark' }, 'Token ', el('b', { text: 'Radar' }), ' · patient-3'),
       el('div', { class: 'topmeta' },
         el('span', { text: 'Snapshot ' + DATA.as_of }),
         el('span', { text: 'DeFiLlama protocol index' }),
@@ -199,22 +247,24 @@
     var top = DATA.rows[0];
     var v = DATA.validation;
     var o = DATA.odds;
-    var vc = DATA.verdict_counts;
+    var liveCounts = { FARM: 0, THIN: 0, SKIP: 0 };
+    DATA.rows.forEach(function (r) { liveCounts[effVerdict(r)] += 1; });
+    var stakeNote = state.stake === 'model' ? 'Deposit-sized stake' : '$' + state.stake + ' stake — live';
     return el('section', { class: 'hero' },
-      el('h1', { text: 'Every protocol that could launch a token, ranked by what the launch would be worth — and whether it is worth farming.' }),
+      el('h1', { text: 'Every protocol that could launch a token, ranked by launch value.' }),
       el('p', null,
         'The watchlist is the floor: all ', el('b', { text: String(DATA.watchlist_size) }), ' protocols with at least $',
         String(Math.round(DATA.floor_usd / 1e6)), 'M of TVL and no token on record. The early radar adds ',
-        el('b', { text: String(DATA.early_size) }), ' more pre-token protocols below that floor. Each row carries the odds its token ever lists, ',
-        'a range on its value, and a farm verdict netted to the dollar — so a big protocol can be a bad farm, and a small one can be worth a stake.'
+        el('b', { text: String(DATA.early_size) }), ' more below that floor. Each row carries the odds its token ever lists, ',
+        'a range on its value, and a farm verdict netted to the dollar.'
       ),
       el('div', { class: 'kpis' },
-        el('div', { class: 'kpi' }, el('b', { text: '×' + v.loo.miss.toFixed(2) + ' vs ×' + v.loo.flatMiss.toFixed(2) }), el('span', { text: 'Leave-one-out miss, fitted curve vs flat 0.25' }), el('small', { text: 'Median factor on ' + v.loo.tested + ' live tokens the curve never saw' })),
-        el('div', { class: 'kpi' }, el('b', { text: Math.round(v.p25Coverage * 100) + '% · ' + Math.round(v.p90Coverage * 100) + '%' }), el('span', { text: 'Range honesty: P25–P75 and P10–P90 coverage' }), el('small', { text: 'Targets 50% and 80% on held-out live tokens' })),
-        el('div', { class: 'kpi' }, el('b', { text: o.brierBinned.toFixed(3) + ' vs ' + o.brierBase.toFixed(3) }), el('span', { text: 'Token odds Brier, binned vs base rate' }), el('small', { text: 'Lower is better; ' + o.peers + ' launch-eligible peers' })),
-        el('div', { class: 'kpi' }, el('b', { text: 'FARM ' + vc.FARM + ' · THIN ' + vc.THIN + ' · SKIP ' + vc.SKIP }), el('span', { text: 'Farm verdicts at a $1,000 stake' }), el('small', { text: 'Net of gas, against a 4.5% T-bill' })),
-        el('div', { class: 'kpi' }, el('b', { text: DATA.watchlist_size + ' / ' + DATA.watchlist_size }), el('span', { text: 'Watchlist covered' }), el('small', { text: DATA.board_size + ' pre-token rows ranked in all' })),
-        el('div', { class: 'kpi' }, el('b', { text: top ? fmtUsd(top.implied_value_usd) : 'n/a' }), el('span', { text: 'Top implied value — ' + (top ? top.name : '') }), el('small', { text: 'Launch ' + (top ? fmtUsd(top.launch_value_usd) : 'n/a') + ' × odds ' + (top ? (top.token_odds * 100).toFixed(0) + '%' : 'n/a') }))
+        el('div', { class: 'kpi' }, el('span', { class: 'klabel', text: 'Leave-one-out miss' }), el('b', { text: '×' + v.loo.miss.toFixed(2) + ' vs ×' + v.loo.flatMiss.toFixed(2) }), el('span', { text: 'Fitted curve vs flat 0.25' }), el('small', { text: 'Median factor on ' + v.loo.tested + ' tokens' })),
+        el('div', { class: 'kpi' }, el('span', { class: 'klabel', text: 'Range honesty' }), el('b', { text: Math.round(v.p25Coverage * 100) + '% · ' + Math.round(v.p90Coverage * 100) + '%' }), el('span', { text: 'P25–P75 and P10–P90' }), el('small', { text: 'Targets 50% and 80%' })),
+        el('div', { class: 'kpi' }, el('span', { class: 'klabel', text: 'Token odds Brier' }), el('b', { text: o.brierBinned.toFixed(3) + ' vs ' + o.brierBase.toFixed(3) }), el('span', { text: 'Binned vs base rate' }), el('small', { text: 'Lower is better; ' + o.peers + ' peers' })),
+        el('div', { class: 'kpi' }, el('span', { class: 'klabel', text: 'Farm verdicts' }), el('b', null, el('span', { class: 'vfarm', text: liveCounts.FARM + ' FARM' })), el('span', { text: 'THIN ' + liveCounts.THIN + ' · SKIP ' + liveCounts.SKIP }), el('small', { text: stakeNote })),
+        el('div', { class: 'kpi' }, el('span', { class: 'klabel', text: 'Watchlist covered' }), el('b', { text: DATA.watchlist_size + ' / ' + DATA.watchlist_size }), el('span', { text: 'Protocols on the watchlist' }), el('small', { text: DATA.board_size + ' rows ranked in all' })),
+        el('div', { class: 'kpi' }, el('span', { class: 'klabel', text: 'Top implied value' }), el('b', { text: top ? fmtUsd(top.implied_value_usd) : 'n/a' }), el('span', { text: top ? top.name : '' }), el('small', { text: 'Launch ' + (top ? fmtUsd(top.launch_value_usd) : 'n/a') + ' × odds ' + (top ? (top.token_odds * 100).toFixed(0) + '%' : 'n/a') }))
       )
     );
   }
@@ -225,9 +275,13 @@
     var rankedPct = Math.round((a.ranked / a.total) * 100);
     var asidePct = 100 - livePct - rankedPct;
     var reasons = a.set_aside_by_reason.map(function (r) { return r.reason + ' ' + r.count; }).join(' · ');
+    var totalImplied = 0;
+    DATA.rows.forEach(function (r) { totalImplied += r.implied_value_usd; });
     return el('section', { class: 'census' },
-      el('h3', { text: 'Every protocol accounted for' }),
-      el('p', { text: 'The snapshot holds ' + a.total + ' protocols. Nothing is silently dropped: each one is either already trading, ranked on this board, or set aside for a stated reason.' }),
+      el('div', { class: 'census-head' },
+        el('h3', { text: 'Every protocol accounted for' }),
+        el('span', { class: 'census-check' }, el('b', { text: '✓' }), ' table = board.json · ' + fmtUsd(totalImplied) + ' total implied · ' + a.total + ' protocols in the snapshot')
+      ),
       el('div', { class: 'bar', 'aria-hidden': 'true' },
         el('i', { class: 'live', style: 'width:' + livePct + '%' }),
         el('i', { class: 'ranked', style: 'width:' + rankedPct + '%' }),
@@ -260,17 +314,22 @@
         el('table', { class: 'evidence' },
           el('thead', null, el('tr', null,
             el('th', { scope: 'col', text: 'Test' }),
-            el('th', { scope: 'col', text: 'Fitted curve' }),
-            el('th', { scope: 'col', text: 'Flat 0.25' }),
-            el('th', { scope: 'col', text: 'Tested' }),
+            el('th', { scope: 'col', class: 'num', text: 'Fitted curve' }),
+            el('th', { scope: 'col', class: 'num', text: 'Flat 0.25' }),
+            el('th', { scope: 'col', class: 'num', text: 'Tested' }),
             el('th', { scope: 'col', text: 'Outcome' })
           )),
           el('tbody', null,
             row('Leave-one-out, all live tokens', v.loo),
             row('Size split: fit small, test big', v.splitLowHigh),
-            row('Size split: fit big, test small', v.splitHighLow)
+            row('Size split: fit big, test small', v.splitHighLow),
+            row('Random splits ×10, median miss', v.randomSplits)
           )
         )
+      ),
+      el('div', { class: 'note' },
+        el('b', { text: 'Rank stability: ' }),
+        'the size curve was refit on ' + v.rankStability.refits + ' bootstrap resamples of the live tokens, and the whole board re-ranked each time. The median rank moves ' + v.rankStability.medianWidth + ' places between its P10 and P90, and ' + v.rankStability.top20Stable + ' of the top 20 stay in the top 20 across the refits. Each row’s detail view prints its own range, so a rank that moves is visible as a moving rank.'
       ),
       el('div', { class: 'note' },
         el('b', { text: 'The curve loses one test. ' }),
@@ -285,14 +344,56 @@
         el('span', { class: 'check' }, el('b', { text: '✓' }), ' Watchlist ' + DATA.checks.watchlist_covered + '/' + DATA.checks.watchlist_total),
         el('span', { class: 'check' }, el('b', { text: '✓' }), ' ' + DATA.checks.distinct_implied + ' distinct implied values'),
         el('span', { class: 'check' }, el('b', { text: '✓' }), ' Farm steps 3–12, 20–600 chars'),
+        el('span', { class: 'check' }, el('b', { text: '✓' }), ' Rank ranges computed for ' + DATA.checks.rows + ' rows'),
         el('span', { class: 'check' }, el('b', { text: '✓' }), ' No external URL in the page source')
       )
     );
   }
 
+  // Download the rows the reader is looking at, as CSV or JSON.
+  function download(name, text, type) {
+    var blob = new Blob([text], { type: type });
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement('a');
+    a.href = url;
+    a.download = name;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(function () { URL.revokeObjectURL(url); }, 1000);
+  }
+  function csvCell(v) {
+    var s = v === null || v === undefined ? '' : String(v);
+    return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+  }
+  function exportCSV() {
+    var head = ['rank', 'protocol', 'category', 'chains', 'tvl_usd', 'change_7d', 'age_days', 'token_odds', 'launch_value_usd', 'p25_usd', 'p75_usd', 'implied_value_usd', 'verdict', 'net_usd', 'net_per_hour_usd'];
+    var lines = [head.join(',')];
+    sorted(filtered()).forEach(function (r) {
+      var live = liveVerdict(r, effectiveStake(r));
+      lines.push([
+        r.rank, r.name, r.category, (r.chains || []).join(';'), r.tvl_usd, r.change_7d,
+        r.age_days, r.token_odds, r.launch_value_usd, r.p25_usd, r.p75_usd,
+        r.implied_value_usd, live.verdict, Math.round(live.net * 100) / 100,
+        Math.round(live.perHour * 100) / 100
+      ].map(csvCell).join(','));
+    });
+    download('token-radar-board.csv', lines.join('\n') + '\n', 'text/csv');
+  }
+  function exportJSON() {
+    download('token-radar-board.json', JSON.stringify(sorted(filtered()), null, 2) + '\n', 'application/json');
+  }
+  function resetFilters() {
+    state.q = ''; state.category = 'all'; state.chain = 'all'; state.verdict = 'all';
+    state.watchOnly = false; state.stake = 'model'; state.sort = 'implied'; state.dir = -1;
+    writeHash(); render();
+  }
+
   function toolbar() {
     var categories = Array.from(new Set(DATA.rows.map(function (r) { return r.category || 'Other'; }))).sort();
     var chains = Array.from(new Set(DATA.rows.reduce(function (acc, r) { return acc.concat(r.chains || []); }, []))).sort();
+    var counts = { all: DATA.rows.length, FARM: 0, THIN: 0, SKIP: 0 };
+    DATA.rows.forEach(function (r) { counts[effVerdict(r)] += 1; });
     var search = el('input', { type: 'search', placeholder: 'Search name, category or chain', value: state.q, 'aria-label': 'Search the board' });
     search.addEventListener('input', function () { state.q = search.value; writeHash(); render(); });
     var cat = el('select', { 'aria-label': 'Filter by category' },
@@ -305,33 +406,53 @@
       chains.map(function (c) { return el('option', { value: c, text: c, selected: c === state.chain ? 'selected' : null }); })
     );
     chn.addEventListener('change', function () { state.chain = chn.value; writeHash(); render(); });
-    var ver = el('select', { 'aria-label': 'Filter by farm verdict' },
-      [['all', 'All verdicts'], ['FARM', 'FARM only'], ['THIN', 'THIN only'], ['SKIP', 'SKIP only']].map(function (o) {
-        return el('option', { value: o[0], text: o[1], selected: o[0] === state.verdict ? 'selected' : null });
+    var stk = el('select', { 'aria-label': 'Stake for the farm verdicts' },
+      [['model', 'Stake: model-sized'], ['500', 'Stake: $500'], ['1000', 'Stake: $1,000'], ['5000', 'Stake: $5,000'], ['10000', 'Stake: $10,000'], ['25000', 'Stake: $25,000'], ['50000', 'Stake: $50,000']].map(function (o) {
+        return el('option', { value: o[0], text: o[1], selected: o[0] === state.stake ? 'selected' : null });
       })
     );
-    ver.addEventListener('change', function () { state.verdict = ver.value; writeHash(); render(); });
-    var watch = el('input', { type: 'checkbox', checked: state.watchOnly ? 'checked' : null, 'aria-label': 'Watchlist only' });
-    watch.addEventListener('change', function () { state.watchOnly = watch.checked; writeHash(); render(); });
+    stk.addEventListener('change', function () { state.stake = stk.value; writeHash(); render(); });
     var sort = el('select', { 'aria-label': 'Sort the board' },
       [['implied', 'Sort: implied value'], ['launch', 'Sort: launch value'], ['odds', 'Sort: token odds'], ['net', 'Sort: net per hour'], ['tvl', 'Sort: TVL'], ['growth', 'Sort: 7-day growth'], ['age', 'Sort: age'], ['name', 'Sort: name']].map(function (o) {
         return el('option', { value: o[0], text: o[1], selected: o[0] === state.sort ? 'selected' : null });
       })
     );
     sort.addEventListener('change', function () { state.sort = sort.value; state.dir = -1; render(); });
+    var watch = el('input', { type: 'checkbox', checked: state.watchOnly ? 'checked' : null, 'aria-label': 'Watchlist only' });
+    watch.addEventListener('change', function () { state.watchOnly = watch.checked; writeHash(); render(); });
+    function chip(value, label, cls) {
+      return el('button', {
+        type: 'button', class: 'chip', 'aria-pressed': state.verdict === value ? 'true' : 'false',
+        onclick: function () { state.verdict = value; writeHash(); render(); }
+      }, el('span', { class: cls || '', text: label }), ' ', el('b', { text: String(counts[value]) }));
+    }
     return el('div', { class: 'toolbar' },
-      el('div', { class: 'field' }, el('label', { text: 'Search' }), search),
-      el('div', { class: 'field' }, el('label', { text: 'Category' }), cat),
-      el('div', { class: 'field' }, el('label', { text: 'Chain' }), chn),
-      el('div', { class: 'field' }, el('label', { text: 'Verdict' }), ver),
-      el('label', { class: 'checkline' }, watch, 'Watchlist only'),
-      el('div', { class: 'field' }, el('label', { text: 'Order' }), sort),
-      el('span', { class: 'shown', text: filtered().length + ' of ' + DATA.board_size + ' rows shown' })
+      el('div', { class: 'trow' },
+        el('div', { class: 'field grow' }, el('label', { text: 'Search' }), search),
+        el('div', { class: 'field' }, el('label', { text: 'Category' }), cat),
+        el('div', { class: 'field' }, el('label', { text: 'Chain' }), chn),
+        el('div', { class: 'field' }, el('label', { text: 'Farm stake' }), stk),
+        el('div', { class: 'field' }, el('label', { text: 'Order' }), sort),
+        el('button', { class: 'btn sm', type: 'button', text: 'Reset', onclick: resetFilters }),
+        el('button', { class: 'btn sm', type: 'button', text: 'CSV', onclick: exportCSV }),
+        el('button', { class: 'btn sm', type: 'button', text: 'JSON', onclick: exportJSON })
+      ),
+      el('div', { class: 'trow' },
+        el('div', { class: 'chips' },
+          el('span', { class: 'chiplabel', text: 'Verdict' }),
+          chip('all', 'All', ''),
+          chip('FARM', 'FARM', 'cfarm'),
+          chip('THIN', 'THIN', 'cthin'),
+          chip('SKIP', 'SKIP', 'cskip')
+        ),
+        el('label', { class: 'checkline' }, watch, 'Watchlist only'),
+        el('span', { class: 'shown', text: filtered().length + ' of ' + DATA.board_size + ' rows shown' })
+      )
     );
   }
 
-  function sortHead(key, label) {
-    return el('th', { scope: 'col' },
+  function sortHead(key, label, right) {
+    return el('th', { scope: 'col', class: right ? 'r' : null },
       el('button', { type: 'button', onclick: function () { if (state.sort === key) state.dir = -state.dir; else { state.sort = key; state.dir = -1; } render(); } },
         label,
         state.sort === key ? el('span', { 'aria-hidden': 'true', text: state.dir < 0 ? ' ↓' : ' ↑' }) : null
@@ -339,6 +460,10 @@
     );
   }
 
+  // The detail drawer for one protocol: the farm verdict first (the
+  // actionable answer), then how the figure is made, the priced
+  // neighbours, the rank stability and the farm plan. Single column,
+  // rendered into the slide-over panel by render().
   function detailCell(row) {
     var calc = recompute(row);
     var launchOk = calc.launch === row.launch_value_usd;
@@ -361,11 +486,20 @@
         el('b', { text: '×' + n.multiple.toFixed(3) + ' (mcap ' + fmtUsd(n.mcap_usd) + ')' })
       );
     });
-    var stakeLine = row.verdict_stake_to_farm_usd === null
-      ? 'No stake clears the T-bill bar — this row never pays, at any size.'
-      : 'A $' + row.verdict_stake_to_farm_usd + ' stake would turn it into a FARM.';
+    var live = liveVerdict(row, effectiveStake(row));
+    var liveStakeLine = live.stakeToFarm === null
+      ? 'No stake clears the T-bill bar — the money earns more sitting still.'
+      : 'A $' + live.stakeToFarm + ' stake would turn it into a FARM.';
     return el('div', { class: 'detail' },
-      el('div', null,
+      el('div', { class: 'dsec' },
+        el('h3', { text: 'Farm verdict — at a $' + live.stake + ' stake' + (state.stake === 'model' ? ' (model-sized)' : ' — recomputed live') }),
+        el('div', { class: 'verdictbox ' + live.verdict.toLowerCase() },
+          el('b', { text: live.verdict + ' — ' }),
+          'expected drop ' + fmtMoney(live.drop) + ', gas ' + fmtMoney(live.gas) + ', ' + live.hours + ' hours, net ' + fmtMoney(live.net) + ' (' + fmtMoney(live.perHour) + ' an hour) against a ' + fmtMoney(live.tbill) + ' T-bill. ' + liveStakeLine
+        ),
+        el('p', { class: 'sub', text: 'The plan itself is sized for a small farmer: $' + row.verdict_deposit_usd + ' for ' + row.verdict_hold_days + ' days. The verdict answers whether it is worth scaling to a $' + live.stake + ' stake — the drop is assumed to be 5% of the launch value, gas is 4 transactions, and the benchmark is a 4.5% T-bill.' + (state.stake === 'model' ? '' : ' The farm plan below is the model’s record at the $' + row.verdict_stake_usd + ' model stake.') })
+      ),
+      el('div', { class: 'dsec' },
         el('h3', { text: 'How the figure is made' }),
         el('div', null,
           el('div', { class: 'kv' }, el('span', { text: 'TVL' }), el('b', { text: fmtUsd(row.tvl_usd) })),
@@ -383,22 +517,20 @@
         el('p', { class: 'verify' }, 'Recomputed in this page: ',
           el('b', { class: allOk ? '' : 'bad', text: allOk ? 'matches board.json' : 'differs from the board' }),
           allOk ? ' — launch, odds, implied value and range all agree with the file.' : ' — the data would be stale.'
-        ),
-        el('div', { class: 'neighbours' },
-          el('h3', { text: 'Closest priced neighbours' }),
-          el('p', { class: 'sub', text: 'Live-token protocols nearest this row in TVL, with their real market-cap/TVL ratios. The fitted multiple sits among them.' }),
-          neighbours
-        ),
+        )
+      ),
+      el('div', { class: 'dsec' },
+        el('h3', { text: 'Closest priced neighbours' }),
+        el('p', { class: 'sub', text: 'Live-token protocols nearest this row in TVL, with their real market-cap/TVL ratios. The fitted multiple sits among them.' }),
+        el('div', { class: 'neighbours' }, neighbours)
+      ),
+      el('div', { class: 'dsec' },
+        el('h3', { text: 'Rank stability — 200 refits' }),
+        el('p', { class: 'sub', text: 'The size curve refit on 200 bootstrap resamples of the live tokens, the whole board re-ranked each time. This row ranks ' + row.rank_p10 + '–' + row.rank_p90 + ' across the refits (P10–P90), and stays in the top 20 in ' + Math.round(row.rank_top20_share * 100) + '% of them.' }),
         el('p', { class: 'sub', text: 'Model ' + DATA.model_version + ': the same function scores every protocol. An estimate, not a price.' })
       ),
-      el('div', null,
-        el('h3', { text: 'Farm verdict — at a $1,000 stake' }),
-        el('div', { class: 'verdictbox ' + row.verdict.toLowerCase() },
-          el('b', { text: row.verdict + ' — ' }),
-          'expected drop ' + fmtMoney(row.verdict_drop_usd) + ', gas ' + fmtMoney(row.verdict_gas_usd) + ', ' + row.verdict_hours + ' hours, net ' + fmtMoney(row.verdict_net_usd) + ' (' + fmtMoney(row.verdict_net_per_hour_usd) + ' an hour) against a ' + fmtMoney(row.verdict_tbill_usd) + ' T-bill. ' + stakeLine
-        ),
-        el('p', { class: 'sub', text: 'The plan itself is sized for a small farmer: $' + row.verdict_deposit_usd + ' for ' + row.verdict_hold_days + ' days. The verdict answers whether it is worth scaling to $1,000 — the drop is assumed to be 5% of the launch value, gas is 4 transactions, and the benchmark is a 4.5% T-bill.' }),
-        el('h3', { text: 'Farm plan — ' + steps.length + ' steps', style: 'margin-top:16px' }),
+      el('div', { class: 'dsec' },
+        el('h3', { text: 'Farm plan — ' + steps.length + ' steps' }),
         el('ol', { class: 'farm' }, steps)
       )
     );
@@ -430,22 +562,19 @@
           el('b', null, r.name, WATCH[r.slug] ? el('span', { class: 'badge', text: 'WATCH' }) : null),
           el('span', { class: 'sub', text: (r.category || 'Other') + ' · ' + (r.chains && r.chains.length ? r.chains.slice(0, 2).join(', ') : 'one chain') })
         )),
-        el('td', { class: 'num', text: fmtUsd(r.tvl_usd) }),
-        el('td', { class: 'num ' + growthClass, text: growth }),
-        el('td', { class: 'num', text: fmtAge(r.age_days) }),
-        el('td', { class: 'num', text: (r.token_odds * 100).toFixed(0) + '%' }),
-        el('td', { class: 'num', text: fmtUsd(r.launch_value_usd) }),
-        el('td', { class: 'num', text: fmtRange(r.p25_usd, r.p75_usd) }),
-        el('td', null, el('div', { class: 'valuecell' },
+        el('td', { class: 'num r', text: fmtUsd(r.tvl_usd) }),
+        el('td', { class: 'num r ' + growthClass, text: growth }),
+        el('td', { class: 'num r', text: fmtAge(r.age_days) }),
+        el('td', { class: 'num r', text: (r.token_odds * 100).toFixed(0) + '%' }),
+        el('td', { class: 'num r', text: fmtUsd(r.launch_value_usd) }),
+        el('td', { class: 'num r', text: fmtRange(r.p25_usd, r.p75_usd) }),
+        el('td', { class: 'r' }, el('div', { class: 'valuecell' },
           el('div', { class: 'barval', 'aria-hidden': 'true' }, el('i', { style: 'width:' + Math.max(3, Math.round((r.implied_value_usd / max) * 100)) + '%' })),
           el('span', { class: 'num', text: fmtUsd(r.implied_value_usd) })
         )),
-        el('td', null, el('span', { class: 'pill ' + r.verdict.toLowerCase(), text: r.verdict }))
+        el('td', null, el('span', { class: 'pill ' + effVerdict(r).toLowerCase(), text: effVerdict(r) }))
       );
       tbody.appendChild(tr);
-      if (isOpen) {
-        tbody.appendChild(el('tr', { class: 'detailrow' }, el('td', { colspan: '10' }, detailCell(r))));
-      }
     });
     return el('div', { class: 'panel' },
       el('div', { class: 'tablewrap' },
@@ -454,13 +583,13 @@
           el('thead', null, el('tr', null,
             sortHead('implied', 'Rank'),
             sortHead('name', 'Protocol'),
-            sortHead('tvl', 'TVL'),
-            sortHead('growth', '7d'),
-            sortHead('age', 'Age'),
-            sortHead('odds', 'Odds'),
-            sortHead('launch', 'Launch'),
-            sortHead('implied', 'Range P25–P75'),
-            sortHead('implied', 'Implied value'),
+            sortHead('tvl', 'TVL', true),
+            sortHead('growth', '7d', true),
+            sortHead('age', 'Age', true),
+            sortHead('odds', 'Odds', true),
+            sortHead('launch', 'Launch', true),
+            sortHead('implied', 'Range P25–P75', true),
+            sortHead('implied', 'Implied value', true),
             el('th', { scope: 'col', text: 'Verdict' })
           )),
           tbody
@@ -475,9 +604,9 @@
       tbody.appendChild(el('tr', null,
         el('td', { class: 'num', text: 'live' }),
         el('td', null, el('div', { class: 'name' }, el('b', { text: r.name }), el('span', { class: 'sub', text: (r.category || 'Other') + ' · ' + (r.chains && r.chains.length ? r.chains.slice(0, 2).join(', ') : 'one chain') }))),
-        el('td', { class: 'num', text: fmtUsd(r.tvl_usd) }),
-        el('td', { class: 'num ' + (r.change_7d !== null && r.change_7d >= 0 ? 'up' : 'down'), text: fmtPct(r.change_7d) }),
-        el('td', { class: 'num', text: fmtUsd(r.mcap_usd) }),
+        el('td', { class: 'num r', text: fmtUsd(r.tvl_usd) }),
+        el('td', { class: 'num r ' + (r.change_7d !== null && r.change_7d >= 0 ? 'up' : 'down'), text: fmtPct(r.change_7d) }),
+        el('td', { class: 'num r', text: fmtUsd(r.mcap_usd) }),
         el('td', null, el('span', { class: 'tag', text: 'already trades' }))
       ));
     });
@@ -491,9 +620,9 @@
             el('thead', null, el('tr', null,
               el('th', { scope: 'col', text: 'Status' }),
               el('th', { scope: 'col', text: 'Protocol' }),
-              el('th', { scope: 'col', text: 'TVL' }),
-              el('th', { scope: 'col', text: '7d' }),
-              el('th', { scope: 'col', text: 'Market cap' }),
+              el('th', { scope: 'col', class: 'r', text: 'TVL' }),
+              el('th', { scope: 'col', class: 'r', text: '7d' }),
+              el('th', { scope: 'col', class: 'r', text: 'Market cap' }),
               el('th', { scope: 'col', text: 'Token' })
             )),
             tbody
@@ -519,22 +648,33 @@
           el('li', null, el('b', { text: 'Launch value, fitted — ' }), 'log10(mcap/TVL) = ' + m.fit_intercept.toFixed(4) + ' − ' + Math.abs(m.fit_slope).toFixed(4) + ' × log10(TVL), fitted on the ' + m.fit_n + ' live-token protocols in this snapshot that report a market cap. Big protocols trade at a smaller fraction of TVL than small ones; the fit says so with the snapshot’s own numbers. Clamped to 0.03–0.70. Growth is log-damped (a +200% week is worth ×1.33); maturity saturates (a newborn gets ×0.60, one year ×0.80, three years ×0.90).'),
           el('li', null, el('b', { text: 'Token odds, from the peers — ' }), 'the share of launch-eligible protocols in the same age-and-size cell that already record a token, smoothed toward the cell’s TVL-band rate with a 10-protocol prior. The older a giant gets without a token, the more the peer record reads as “may never launch” — which is why Sentora leads this board and Steakhouse led the last one. Brier ' + DATA.odds.brierBinned.toFixed(3) + ' against a ' + DATA.odds.brierBase.toFixed(3) + ' base rate.'),
           el('li', null, el('b', { text: 'Range, from the model’s own misses — ' }), 'the leave-one-out residuals of the size curve spread 0.915 in log10, so the P25–P75 band runs ×4.14 either way and the P10–P90 band ×32. On held-out live tokens the bands contain the true market cap ' + Math.round(v.p25Coverage * 100) + '% and ' + Math.round(v.p90Coverage * 100) + '% of the time (targets 50% and 80%). Wide, because the comps scatter widely — and the page says so.'),
-          el('li', null, el('b', { text: 'Farm verdict, netted — ' }), 'at a uniform $1,000 stake: the expected drop is 5% of the implied value per dollar of TVL (an assumption, stated here), gas is 4 transactions ($3 on Ethereum, $0.50 elsewhere), hours are setup plus weekly actions, and the benchmark is a 4.5% T-bill. FARM when the net clears the T-bill and $5; THIN when it clears zero; SKIP otherwise. The plan itself stays small-farmer sized ($50–300).'),
+          el('li', null, el('b', { text: 'Farm verdict, netted — ' }), 'at a stake sized to the protocol: 0.1% of its TVL, floored at $500 and capped at $25,000. The expected drop is 5% of the implied value per dollar of TVL (an assumption, stated here), gas is 4 transactions ($3 on Ethereum, $0.50 elsewhere), hours are setup plus weekly actions, and the benchmark is a 4.5% T-bill. FARM when the net clears the T-bill and $5; THIN when it clears zero; SKIP otherwise. Pick another stake in the toolbar and every verdict recomputes live in this page. At a uniform $1,000 the giants still would not pay — gas alone eats the drop — which is why the yardstick is sized to the protocol. No row nets below zero at the model stake, so the SKIP tier is empty on this snapshot (the lowest net is Steakhouse at +$11.18); the binding question is the T-bill, which is what FARM vs THIN answers. The plan itself stays small-farmer sized ($50–300).'),
           el('li', null, el('b', { text: 'Rankable means launchable — ' }), 'pre-token, and not a wrapped, staked or bridged product of a token that already trades (no bridge, liquid-staking, restaking or CEX category; no wrapped/staked word in the name; no exchange name; no version marker). The board ranks all 198 protocols that pass — the watchlist is the floor, never the ceiling.')
         )
       )
     );
   }
 
+  function closeDrawer() {
+    if (!state.expanded) return;
+    state.expanded = null;
+    writeHash();
+    render();
+  }
+
+  var drawerWasOpen = false;
+
   function render() {
+    var stale = document.querySelectorAll('.scrim, .drawer');
+    for (var s = 0; s < stale.length; s++) stale[s].remove();
     app.textContent = '';
     var shell = el('div', { class: 'shell' });
     shell.appendChild(header());
     shell.appendChild(hero());
     shell.appendChild(census());
-    shell.appendChild(evidence());
     shell.appendChild(toolbar());
     shell.appendChild(boardTable());
+    shell.appendChild(evidence());
     shell.appendChild(liveSection());
     shell.appendChild(modelSection());
     shell.appendChild(el('footer', null,
@@ -543,7 +683,43 @@
     ));
     app.appendChild(shell);
     app.setAttribute('aria-busy', 'false');
+    // The detail drawer: a slide-over panel for the selected protocol,
+    // with the board dimmed behind it.
+    var openRow = null;
+    if (state.expanded) {
+      for (var i = 0; i < DATA.rows.length; i++) {
+        if (DATA.rows[i].slug === state.expanded) { openRow = DATA.rows[i]; break; }
+      }
+      if (!openRow) state.expanded = null;
+    }
+    if (openRow) {
+      var scrim = el('div', { class: 'scrim', onclick: closeDrawer });
+      var drawer = el('aside', { class: 'drawer', role: 'dialog', 'aria-label': openRow.name + ' — model, odds, range and farm plan' });
+      var head = el('div', { class: 'drawer-head' },
+        el('div', null,
+          el('div', { class: 'rankline', text: 'Rank ' + openRow.rank + ' of ' + DATA.board_size + (WATCH[openRow.slug] ? ' · Watchlist' : '') }),
+          el('h2', { text: openRow.name }),
+          el('div', { class: 'sub', text: (openRow.category || 'Other') + ' · ' + (openRow.chains || []).join(', ') })
+        ),
+        el('button', { class: 'close', type: 'button', text: 'Close', onclick: closeDrawer })
+      );
+      drawer.appendChild(head);
+      drawer.appendChild(detailCell(openRow));
+      document.body.appendChild(scrim);
+      document.body.appendChild(drawer);
+      if (!drawerWasOpen) {
+        var btn = drawer.querySelector('.close');
+        if (btn) btn.focus();
+      }
+      drawerWasOpen = true;
+    } else {
+      drawerWasOpen = false;
+    }
   }
+
+  document.addEventListener('keydown', function (e) {
+    if (e.key === 'Escape') closeDrawer();
+  });
 
   readHash();
   render();
