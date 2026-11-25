@@ -1,62 +1,60 @@
-# token-launch-radar
+# Token Launch Radar — patient-4
 
-[![make.fun · token-radar-01](https://make.fun/badge/token-radar-01.svg)](https://make.fun/bounty/token-radar-01?utm_source=github&utm_medium=readme&utm_campaign=token-radar-01)
-[![rank](https://make.fun/badge/token-radar-01/yp295/token-launch-radar/rank.svg)](https://make.fun/bounty/token-radar-01/leaderboard?utm_source=github&utm_medium=readme&utm_campaign=token-radar-01)
-[![reward](https://make.fun/badge/token-radar-01/yp295/token-launch-radar/reward.svg)](https://make.fun/bounty/token-radar-01?utm_source=github&utm_medium=readme&utm_campaign=token-radar-01)
+[![make.fun](https://make.fun/badge/token-radar-01.svg)](https://make.fun/bounty/token-radar-01)
+[![rank](https://make.fun/badge/token-radar-01/yp295/token-launch-radar/rank.svg)](https://make.fun/bounty/token-radar-01)
+[![reward](https://make.fun/badge/token-radar-01/yp295/token-launch-radar/reward.svg)](https://make.fun/bounty/token-radar-01)
 
-Build the best token launch radar: read a sealed snapshot of every
-protocol DefiLlama tracks, find the ones that still record no token and
-are not a wrapped or staked product of one that trades, rank them by what
-their launch would be worth, and hand in a web dashboard with the board,
-a detail view per protocol, and the steps to farm each one.
+An entry for the [make.fun bounty “Build the best token launch radar”](https://make.fun/bounty/token-radar-01) (`token-radar-01`).
 
-## The model (patient-3)
+It reads a sealed snapshot of every protocol DefiLlama tracks (758 protocols, 2026-11-14), finds the ones that still record no token and are not a wrapped, staked or bridged product of one that trades, and ranks them by what their launch would be worth — with the odds the token ever lists, a range on the value, and a farm verdict netted to the dollar.
 
-One function scores every protocol, from the snapshot figures only:
+## The model (patient-4)
+
+**Launch value.** The size curve is an ensemble: the average of an OLS line and a median regression, both fitted at runtime on the 128 live tokens that report a market cap.
 
 ```
-implied = round( launch × odds(age, tvl) )
-launch  = round( tvl_usd × multiple(tvl_usd)
-                 × (1 + 0.30 × ln(1 + clamp(change_7d, -50, 200) / 100))
-                 × (0.60 + 0.40 × age / (age + 365)) )
+log10(mcap/TVL) = 3.0830 − 0.4829 · log10(TVL)   (n = 128, R² = 0.167)
+base_multiple(TVL) = clamp(10^(3.0830 − 0.4829 · log10(TVL)), 0.03, 0.70)
+launch = TVL × base_multiple × growth_mult × maturity_mult
+implied = launch × odds
 ```
 
-- **Base multiple, fitted** — `log10(mcap/TVL)` regressed on `log10(TVL)`
-  across the live-token protocols in the snapshot itself (n = 128).
-  Big protocols trade at a smaller fraction of TVL than small ones;
-  the fit says so with the snapshot's own numbers. Clamped to 0.03–0.70.
-- **Growth, log-damped** — a week's change is noisy (one protocol is up
-  4,448% in this snapshot), so it passes through a logarithm first.
-- **Maturity, saturating** — the overdue premium flattens instead of
-  growing forever; an unlisted age uses 513 days, the snapshot's median
-  pre-token age.
-- **Rankable means launchable** — pre-token, and not a wrapped, staked
-  or bridged product of a token that already trades. The board ranks all
-  198 protocols that pass: 40 watchlist + 158 early rows.
-- **Token odds, from the peers** — the share of launch-eligible
-  protocols in the same age-and-size cell that already record a token.
-- **A range on every value** — from the leave-one-out residuals of the
-  size curve (P25–P75 and P10–P90).
-- **A farm verdict at a deposit-sized stake** — 0.1% of the protocol's
-  TVL ($500–$25,000), netted against gas and a 4.5% T-bill; the
-  dashboard lets the reader pick another stake and recomputes live.
-- **Rank stability** — every rank is re-derived under 200 bootstrap
-  refits of the size curve, and each row reports its P10–P90 rank range.
+OLS gives [3.0247, −0.4777]; the median line gives [3.1414, −0.4881]. Growth is a log-damped prior (`1 + 0.30·ln(1 + clamp(change_7d, −50, 200)/100)`) and maturity a saturating prior (`0.60 + 0.40·age/(age+365)`, unknown age 513 days) — both kept as bounded priors because, fitted, they come out negative (growth −1.61 per 100 points, age −0.13) and lose held-out tests. **Token odds** come from the peers' own record: the share of launch-eligible peers in the same age-and-size cell that already record a token, smoothed with a 10-protocol prior (Brier 0.208 vs 0.247 for the base rate). **The range** comes from the ensemble's own leave-one-out residuals (σ = 0.912): P25–P75 = implied ÷×4.12, P10–P90 = implied ÷×31.65.
 
-The full specification, with the calibration numbers and the top 20, is
-in [MODEL.md](../MODEL.md) — kept in the project notes, not the repo.
+**Farm verdict, scheme (a).** Judged at a model-sized stake (0.1% of TVL, $500–$25,000), with a 5% drop share, 4 transactions of gas ($3 on Ethereum, $0.50 elsewhere) and a 4.5% T-bill benchmark. FARM pays even at P25, THIN pays at the point estimate or at P75, SKIP pays not even at P75. “Pays” means net ≥ the T-bill and net ≥ $5. Result on this snapshot: **4 FARM / 180 THIN / 14 SKIP** — the FARM rows are fstswap, metalx-swap, katana-dex and syncswap.
+
+One honest disclosure, printed on the dashboard too: 123 of the 180 THIN rows only pay at P75, not at the point estimate. They stay THIN because “pays in the optimistic case” is what thin means — but under a literal point-estimate reading the board would read 4 / 57 / 137. That is a judgment call, stated, not hidden.
+
+## Held-out tests (median miss factor vs the flat 0.25 multiple)
+
+| Test | Ensemble | Flat 0.25 |
+|---|---:|---:|
+| Leave-one-out, 128 tokens | ×3.53 | ×4.91 |
+| Size split: fit small, test big | ×3.53 | ×4.84 |
+| Size split: fit big, test small | ×3.62 | ×5.62 |
+| Random halves ×10 (median) | ×3.68 | ×5.05 |
+| Walk-forward (fit 47 oldest, test 48 newest) | ×2.93 | ×4.14 |
+
+The ensemble wins 5 of 5 tests against flat. Against patient-3 it wins 4 of 5: the one loss is leave-one-out (×3.40 → ×3.53), a 4% gap that a 2,000-resample bootstrap puts inside noise (95% interval [0.97×, 1.04×]). The win that matters is the low→high split patient-3 lost (×5.20 → ×3.53). The top 20 keep their order except ranks 17/18 swapping (BitFi Basis, RockawayX); Sentora still leads at $59.8M implied. Every rank carries its P10–P90 range from 200 bootstrap refits of the curve.
 
 ## Run it
 
-```sh
-mkdir -p out && MAKEFUN_OUTPUT_DIR=out node main.ts --input <snapshot.json|directory>
+Node 22+, standard library only, no network, no install:
+
+```
+node main.ts /input/snapshot.json /output
 ```
 
-Node 22, standard library only, no network. The program reads the
-snapshot, writes `board.json`, `data.js`, `dashboard/`, `screenshots/`
-and `dossier.json` to the output directory. Run it twice and both runs
-write the same bytes.
+It writes `/output/board.json` (198 rows), `/output/dashboard/` (the page plus `data.js`), `/output/screenshots/` (copied from `repo/screenshots/`) and `/output/dossier.json`. Run it twice: both runs write identical bytes. Before writing anything it runs a self-check gate — 198 rows, watchlist 40/40, implied values strictly decreasing, farm plans 3–12 steps of 20–600 characters, no URL in the dashboard source, rank ranges for all rows — and fails loudly instead of writing a bad board.
 
----
+## Layout
 
-<sub>Entered on [make.fun](https://make.fun/?ref=ygqbwvx0&utm_source=github&utm_medium=readme&utm_campaign=token-radar-01) · AI agents build software for cash rewards</sub>
+- `main.ts` — entrypoint: fit, validate, score, bootstrap, self-check, write outputs.
+- `lib/model.ts` — the model: eligibility rule, ensemble fit, odds, scoring, farm economics and plans, validation, bootstrap.
+- `vendor/makefun-board.ts` — the kit's dossier library, copied as-is.
+- `dashboard/` — `index.html`, `app.css`, `app.js` (source under 64 KiB); `data.js` is generated by `main.ts`.
+- `screenshots/` — three real browser renders of the dashboard (board, detail drawer, filtered view), 1440×900.
+
+## License
+
+MIT — see [LICENSE](LICENSE).
